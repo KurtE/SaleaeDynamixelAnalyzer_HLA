@@ -1,0 +1,13 @@
+{
+  "name": "Dynamixel Servo HLA",
+  "apiVersion": "1.0.0",
+  "author": "KurtE",
+  "version": "0.0.1",
+  "description": "HLA for Robotis Dynamixel Servos",
+  "extensions": {
+    "SaleaeDynamixelAnalyzer_HLA": {
+      "type": "HighLevelAnalyzer",
+      "entryPoint": "HighLevelAnalyzer.Hla"
+    }
+  }
+}
