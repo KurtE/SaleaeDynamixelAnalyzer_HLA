@@ -5,7 +5,7 @@
   "version": "0.0.1",
   "description": "HLA for Robotis Dynamixel Servos",
   "extensions": {
-    "SaleaeDynamixelAnalyzer_HLA": {
+    "Dynamixel Servo HLA": {
       "type": "HighLevelAnalyzer",
       "entryPoint": "HighLevelAnalyzer.Hla"
     }
