@@ -271,6 +271,8 @@ class Hla(HighLevelAnalyzer):
         'DXL ReplyE': {'format': '{{data.cmd}} ID:{{data.id}} Err:{{data.err}}'},
         'DXL ReplyD': {'format': '{{data.cmd}} ID:{{data.id}} = {{data.data}}'},
         'DXL ReplyDE': {'format': '{{data.cmd}} ID:{{data.id}} Err:{{data.err}} = {{data.data}}'},
+        'DXL BulkW': { 'format': 'ID:{{data.id}} {{data.cmd}} {{data.data}}' },
+        'DXL BulkR': { 'format': 'ID:{{data.id}} {{data.cmd}} {{data.data}}' },
         'dxl ???': { 'format': 'ID:{{data.id}} {{data.cmd}} {{data.data}}' }
     }
 
@@ -306,6 +308,7 @@ class Hla(HighLevelAnalyzer):
         self.last_cmd = None
         self.last_cmd_reg = 999
         self.last_cmd_reg_cnt = None
+        self.bulk_read_info = None;
         self.ServoNameTable = None
         self.frame_state = '1stFF'
         self.frame_data = {}
@@ -359,8 +362,8 @@ class Hla(HighLevelAnalyzer):
             0x82: self.ProcessProt2_SyncRead,
             0x83: self.ProcessProt2_SyncWrite,
             #0x8A: self.ProcessProt2_FastSyncRead,
-            #0x92: self.ProcessProt2_BulkRead,
-            #0x93: self.ProcessProt2_BulkWrite,
+            0x92: self.ProcessProt2_BulkRead,
+            0x93: self.ProcessProt2_BulkWrite,
             #0x9A: self.ProcessProt2_FastBulkRead,
         }
 
@@ -383,11 +386,17 @@ class Hla(HighLevelAnalyzer):
             else:
                 self.ServoNameTable = self.s_x_register_names
 
-    def generate_data_string(self, start_index):
+    def generate_data_string(self, start_index, reg_count):
         reg =  self.last_cmd_reg
         i = start_index
         data_str = ''
-        while i < len(self.data_packet_save):
+        if reg_count > 0:
+            reg_end = start_index + reg_count
+            if reg_end > len(self.data_packet_save):
+                reg_end = len(self.data_packet_save)
+        else:    
+            reg_end = len(self.data_packet_save)
+        while i < reg_end:
             cb_reg = 1
 
             if reg in self.ServoNameTable:
@@ -489,7 +498,7 @@ class Hla(HighLevelAnalyzer):
                 print("  DXL Reply ID:", self.frame_data['id'], " Err:", self.frame_data['err'])
                 new_frame = AnalyzerFrame("DXL ReplyE", self.frame_start_time, frame.end_time, self.frame_data)
         else:
-            data_str = self.generate_data_string(0)
+            data_str = self.generate_data_string(0, -1)
             self.frame_data['data'] = data_str
             if err_str == '':
                 print("  DXL Reply ID:", self.frame_data['id'], " Data:", data_str)
@@ -622,8 +631,16 @@ class Hla(HighLevelAnalyzer):
                 data_str = 'model:' + str(model_num) + ' Ver:' + str(firmware_ver)
             else:
                 data_str = 'model:' + hex(model_num) + ' Ver:' + hex(firmware_ver)
+        elif self.last_cmd == 0x92:
+            # bulk read response
+            if self.servo_id[0] in self.bulk_read_info:
+                bri = self.bulk_read_info[self.servo_id[0]]
+                print(bri)
+                self.last_cmd_reg = bri['reg']
+                self.last_cmd_reg_cnt = bri['#']
+            data_str = self.generate_data_string(1, -1)                    
         else:
-            data_str = self.generate_data_string(1)
+            data_str = self.generate_data_string(1, -1)
         
         self.frame_data['data'] = data_str
         if (data_str == ''):
@@ -730,7 +747,65 @@ class Hla(HighLevelAnalyzer):
         return self.ProcessProt2_unknown(frame, cmd)
 
     def ProcessProt2_BulkRead(self, frame: AnalyzerFrame, cmd):
-        return self.ProcessProt2_unknown(frame, cmd)
+        param_index = 0
+        data_len = len(self.data_packet_save)
+        print("DXL ", self.frame_data['cmd'], " ID:", self.frame_data['id'], " Reg:")
+        complete_data_str = ''
+        self.bulk_read_info = {}
+        while param_index < data_len:
+            # make sure we have enough bytes to get the initial data for servo
+            if (data_len - param_index) < 5:
+                return AnalyzerFrame("DXL Error", self.frame_start_time, frame.end_time, self.frame_data)
+            servo_id = self.data_packet_save[param_index]
+            reg = int.from_bytes(self.data_packet_save[param_index+1:param_index+3],'little')
+            reg_cnt = int.from_bytes(self.data_packet_save[param_index+3:param_index+5],'little')
+            self.last_cmd_reg = reg
+            self.last_cmd_reg_cnt = reg_cnt
+            param_index += 5 # we used up those bytes
+
+            if reg in self.ServoNameTable:
+                reg_info = self.ServoNameTable[reg]
+                reg_str = reg_info["name"]
+            else:                 
+                reg_str = hex(reg)
+
+            print("\tID:", str(servo_id),' Reg:',reg_str, " Cnt: ",str(reg_cnt))
+            complete_data_str += ' ' + str(servo_id) + '(' + reg_str + ', ' + str(reg_cnt) + '):'
+            self.bulk_read_info[servo_id] = {"reg":reg, "#":reg_cnt}
+        self.frame_data['data'] = complete_data_str
+        return AnalyzerFrame("DXL BulkR", self.frame_start_time, frame.end_time, self.frame_data)
+
+    def ProcessProt2_BulkWrite(self, frame: AnalyzerFrame, cmd):
+        param_index = 0
+        data_len = len(self.data_packet_save)
+        print("DXL ", self.frame_data['cmd'], " ID:", self.frame_data['id'], " Reg:")
+        complete_data_str = ''
+        while param_index < data_len:
+            # make sure we have enough bytes to get the initial data for servo
+            if (data_len - param_index) < 5:
+                return AnalyzerFrame("DXL Error", self.frame_start_time, frame.end_time, self.frame_data)
+            servo_id = self.data_packet_save[param_index]
+            reg = int.from_bytes(self.data_packet_save[param_index+1:param_index+3],'little')
+            reg_cnt = int.from_bytes(self.data_packet_save[param_index+3:param_index+5],'little')
+            self.last_cmd_reg = reg
+            self.last_cmd_reg_cnt = reg_cnt
+            param_index += 5 # we used up those bytes
+            if (data_len - param_index) < reg_cnt:
+                return AnalyzerFrame("DXL Error", self.frame_start_time, frame.end_time, self.frame_data)
+
+            if reg in self.ServoNameTable:
+                reg_info = self.ServoNameTable[reg]
+                reg_str = reg_info["name"]
+            else:                 
+                reg_str = hex(reg)
+            data_str = self.generate_data_string(param_index, reg_cnt)
+    
+            print("\tID:", str(servo_id),' Reg:',reg_str, " Data: ",data_str)
+            complete_data_str += ' ' + str(servo_id) + '(' + reg_str + '):' + data_str
+            param_index += reg_cnt
+        self.frame_data['data'] = complete_data_str
+        return AnalyzerFrame("DXL BulkW", self.frame_start_time, frame.end_time, self.frame_data)
+
 
     def ProcessProt2_Clear(self, frame: AnalyzerFrame, cmd):
         return self.ProcessProt2_unknown(frame, cmd)
