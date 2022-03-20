@@ -266,7 +266,9 @@ class Hla(HighLevelAnalyzer):
         'DXL Reboot': {'format': '{{data.cmd}} ID:{{data.id}}'},
         'DXL Write': {'format': '{{data.cmd}} ID:{{data.id}} R:{{data.reg}} = {{data.data}}'},    
         'DXL SWrite': {'format': '{{data.cmd}} ID:{{data.id}} R:{{data.reg}} #{{data.cnt}} = {{data.data}}'},
-        'DXL Read': {'format': '{{data.cmd}} ID:{{data.id}} R:{{data.reg}} #{{data.cnt}}'},
+        'DXL SRead':{'format': '{{data.cmd}} ID:{{data.id}} R:{{data.reg}}({{data.cnt}}) {{data.data}}' },
+        'DXL FSRead':{'format': '{{data.cmd}} ID:{{data.id}} R:{{data.reg}}({{data.cnt}}) {{data.data}}' },
+        'DXL Read': {'format': '{{data.cmd}} ID:{{data.id}} R:{{data.reg}}({{data.cnt}})'},
         'DXL Reply': {'format': '{{data.cmd}} ID:{{data.id}}'},
         'DXL ReplyE': {'format': '{{data.cmd}} ID:{{data.id}} Err:{{data.err}}'},
         'DXL ReplyD': {'format': '{{data.cmd}} ID:{{data.id}} = {{data.data}}'},
@@ -295,7 +297,7 @@ class Hla(HighLevelAnalyzer):
         self.frame_start_time = None
         self.frame_second_time = None
         self.last_char_end_time = 0
-        self.packet_timeout_char_count = 3
+        self.packet_timeout_char_count = 100
         self.frame_end_time = None
         self.servo_id = None
         self.frame_protocol = 1
@@ -361,7 +363,7 @@ class Hla(HighLevelAnalyzer):
             0x20: self.ProcessProt2_Backup,
             0x82: self.ProcessProt2_SyncRead,
             0x83: self.ProcessProt2_SyncWrite,
-            #0x8A: self.ProcessProt2_FastSyncRead,
+            0x8A: self.ProcessProt2_FastSyncRead,
             0x92: self.ProcessProt2_BulkRead,
             0x93: self.ProcessProt2_BulkWrite,
             #0x9A: self.ProcessProt2_FastBulkRead,
@@ -631,11 +633,40 @@ class Hla(HighLevelAnalyzer):
                 data_str = 'model:' + str(model_num) + ' Ver:' + str(firmware_ver)
             else:
                 data_str = 'model:' + hex(model_num) + ' Ver:' + hex(firmware_ver)
+        elif self.last_cmd == 0x8a:
+            # Fast Sync Read
+            param_index = 0
+            data_len = len(self.data_packet_save)
+            print("DXL ", self.frame_data['cmd'], " ID:", self.frame_data['id'], " Reg:")
+            data_str = ''
+            #print("$$$ DL:", str(data_len), " pc:", str(self.last_cmd_reg_cnt))
+            while param_index < data_len:
+                # make sure we have enough bytes to get the initial data for servo
+                #print("$$$ PI:", str(param_index))
+                if (data_len - param_index) < (2 + self.last_cmd_reg_cnt):
+                    return AnalyzerFrame("DXL Error", self.frame_start_time, frame.end_time, self.frame_data)
+                err = self.data_packet_save[param_index]
+                err_str = ''
+                if err:
+                    err_str = ' err: '
+                    if (err & 0x80) != 0:
+                        error_str += 'Alert'
+                    elif err in self.s_result_errors:
+                        error_str += self.s_result_errors[err]
+                    else:    
+                        error_str += hex(err)
+
+                servo_id = self.data_packet_save[param_index+1]
+                servo_data_str = self.generate_data_string(param_index+2, self.last_cmd_reg_cnt)
+                param_index += (4 + self.last_cmd_reg_cnt) # we used up those bytes
+
+                print("\tID:", str(servo_id)," Data: ", servo_data_str, err_str)
+                data_str += ' ' + str(servo_id) + ':' + servo_data_str + err_str
+
         elif self.last_cmd == 0x92:
             # bulk read response
             if self.servo_id[0] in self.bulk_read_info:
                 bri = self.bulk_read_info[self.servo_id[0]]
-                print(bri)
                 self.last_cmd_reg = bri['reg']
                 self.last_cmd_reg_cnt = bri['#']
             data_str = self.generate_data_string(1, -1)                    
@@ -744,7 +775,39 @@ class Hla(HighLevelAnalyzer):
         return AnalyzerFrame("DXL SWrite", self.frame_start_time, frame.end_time, self.frame_data)
 
     def ProcessProt2_SyncRead(self, frame: AnalyzerFrame, cmd):
-        return self.ProcessProt2_unknown(frame, cmd)
+        if len(self.data_packet_save) < 4:
+            return AnalyzerFrame("DXL Error", self.frame_start_time, frame.end_time, self.frame_data)
+        reg = int.from_bytes(self.data_packet_save[:2],'little')
+        reg_cnt = int.from_bytes(self.data_packet_save[2:4],'little')
+        self.last_cmd_reg = reg
+        self.last_cmd_reg_cnt = reg_cnt
+
+        if reg in self.ServoNameTable:
+            reg_info = self.ServoNameTable[reg]
+            self.frame_data['reg'] = reg_info["name"]
+        else:                 
+            self.frame_data['reg'] = hex(reg)
+        self.frame_data['cnt'] = hex(reg_cnt)    
+        data_str = ''
+        if len(self.data_packet_save) > 4:
+            data_str = 'IDs:'
+            for i in range(4, len(self.data_packet_save)):
+                if self.base == 10:
+                    data_str +=' ' + str(self.data_packet_save[i])
+                else:
+                    data_str +=' ' + hex(self.data_packet_save[i])
+        self.frame_data['data'] = data_str
+        # handle both sync read and fast sync read
+        print("DXL ", self.frame_data['cmd'], " ID:", self.frame_data['id'], " Reg:", self.frame_data['reg'], 
+            " Cnt:", self.frame_data['cnt'], data_str)
+        if cmd == 0x82:
+            return AnalyzerFrame("DXL SRead", self.frame_start_time, frame.end_time, self.frame_data)
+        else:    
+            return AnalyzerFrame("DXL FSRead", self.frame_start_time, frame.end_time, self.frame_data)
+
+
+    def ProcessProt2_FastSyncRead(self, frame: AnalyzerFrame, cmd):
+        return self.ProcessProt2_SyncRead(frame, cmd)
 
     def ProcessProt2_BulkRead(self, frame: AnalyzerFrame, cmd):
         param_index = 0
